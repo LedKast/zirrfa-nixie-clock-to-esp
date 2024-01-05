@@ -11,8 +11,13 @@ Features:
 
 ## Upgrade guide
 
-### Software
-You can use VScode + PlatformIO to build and upload firmware to esp board
+### Firmware
+*   Create file `include/secret.h` with code:
+    ```
+    const char *WIFI_SSID     = "your-wifi-ap-ssid";
+    const char *WIFI_PASSWORD = "your-wifi-ap-password";
+    ```
+*   Build project: you can use VScode + PlatformIO to build and upload firmware to esp board
 
 ### Hardware
 *   Used esp board - WeMos D1 mini
