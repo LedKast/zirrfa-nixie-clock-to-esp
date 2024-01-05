@@ -1,0 +1,6 @@
+.pio
+.vscode
+.idea
+include/secrets.h
+docs
+*.code-workspace
