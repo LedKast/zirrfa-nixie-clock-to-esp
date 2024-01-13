@@ -32,4 +32,7 @@ Cheap boards "Zirrfa nixie tube DIY kit" for nixie clock [present on aliexpress]
 **PCB** ![PCB](img/PCB.png)
 
 *TODO hardware mod guide*
-*   Used esp board - WeMos D1 mini
+### Parts:
+*   ESP board - WeMos D1 mini
+*   Zirrfa board v5.1
+*   

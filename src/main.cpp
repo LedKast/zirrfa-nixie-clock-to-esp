@@ -9,11 +9,15 @@
 #include <WiFiUdp.h>
 #include <RTClib.h>
 
+#include <stdlib.h>
+
 #include "display.h"
 #include "secrets.h"
 
 
 // === Configurable constants ===
+// analog button pin
+static const uint8_t ANALOG_BUTTON_PIN = A0;
 
 // PWM pins mapping
 static const uint8_t PWM_1_PIN = TX;
@@ -32,8 +36,8 @@ static const uint16_t HIGH_BRIGHTNESS_THRESHOLD = uint16_t((double)MAX_BRIGHTNES
 static const uint16_t LOW_BRIGHTNESS_THRESHOLD = uint16_t((double)MIN_BRIGHTNESS * 1.0 + 0.1);
 
 // digits change fade in/out effect time
-static const uint16_t FADE_IN_MILLIS = 300;
-static const uint16_t FADE_OUT_MILLIS = 200;
+static const uint16_t FADE_IN_MILLIS = 380;
+static const uint16_t FADE_OUT_MILLIS = 220;
 
 // delay between PWM duty update (digits change fade in/out effect)
 static const uint16_t PWM_CHANGE_DELAY_MILLIS = 10;
@@ -48,12 +52,26 @@ static const uint16_t STATUS_BLINK_DELAY = 150;
 static const long TIMEZONE_OFFSET_SECONDS = 3 * 60 * 60;
 
 // NTP server address
-static const char NTP_SERVER_ADDR[] = "pool.ntp.org";
+static const char NTP_SERVER_ADDR[] = "time.google.com";
 
 // WiFi credentials
 // Define constants in secrets.h file or change to ssid and password string
 const char *ssid     = WIFI_SSID;
 const char *password = WIFI_PASSWORD;
+
+const char *CLOCK_HOSTNAME = "nixie-clock-in14";
+
+// Input
+static const uint16_t UP_BUTTON_VALUE = 389;
+static const uint16_t DOWN_BUTTON_VALUE = 105;
+static const uint16_t SET_BUTTON_VALUE = 10;
+
+static const uint16_t BUTTON_MEASURE_HALF_WINDOW = 25;
+static const uint16_t BUTTON_MEASURE_DELAY_MILLIS = 5;
+static const uint16_t BUTTON_MEASURE_COUNTS = 5; // only odd values
+static const uint16_t BUTTON_MEASURE_PRESSED_THRESHOLD = 800;
+
+static const uint16_t BUTTON_LONG_PRESS_TIME = 800;
 
 
 // === Constants ===
@@ -94,6 +112,19 @@ uint32_t diagnosticCounter = 0;
 bool statusBlinkEnabled = false;
 uint8_t statusBlinkState = 1;
 
+// input
+bool readButton = false;
+uint32_t lastInputReadMillis = 0;
+uint32_t buttonsPressedStartMillis = 0;
+uint16_t buttonsInputAcc[BUTTON_MEASURE_COUNTS];
+uint8_t buttonsInputMeasureCount = 0;
+
+enum class ButtonType { NONE = 0, UP = 1, DOWN = 2, SET = 3 };
+enum class PressType { NONE = 0, SHORT = 1, LONG = 2 };
+ButtonType buttonType = ButtonType::NONE;
+PressType pressType = PressType::NONE;
+
+
 
 void handleState();
 void displayClock(DateTime now);
@@ -102,22 +133,26 @@ void initDisplay();
 void initRTC();
 void initWiFi();
 void initPWM();
-void setMaxBrightness();
-void setZeroBrightness();
+void setMaxPWM();
+void setZeroPWM();
+void setPWM(uint16_t value);
 void setRelativeBrightness(uint8_t pin, uint32_t value, uint32_t range);
 void rightDotBlinkSync();
 void rightDotBlinkAsync();
 void displayInitStatus(uint8_t status);
 void updateTimeFromNTP();
+void inputHandler();
+int comparator(const void * a, const void * b);
 
 
 void setup() {
+    delay(500);
 
     // init display
     initPWM();
-    setZeroBrightness();
+    setZeroPWM();
     initDisplay();
-    setMaxBrightness();
+    setMaxPWM();
 
     displayInitStatus(1);
     rightDotBlinkSync();
@@ -132,11 +167,12 @@ void setup() {
 }
 
 void loop() {
+    // === Input ===
+    inputHandler();
+
     // === processing section ===
     rightDotBlinkAsync(); // display status
     updateTimeFromNTP();
-
-    // TODO handle buttons input
 
     // === display section ===
     clearBufferWithoutDots();
@@ -152,15 +188,15 @@ void handleState() {
             displayClock(now);
             break;
         case State::CLOCK_SETUP:
-            setMaxBrightness();
+            setMaxPWM();
             // TODO change clock
             break;
         case State::BRIGHTNESS_SETUP:
-            setMaxBrightness();
+            setMaxPWM();
             // TODO change brightness
             break;
         case State::DIGITS_DIAGNOSTIC:
-            setMaxBrightness();
+            setMaxPWM();
             tmp = diagnosticCounter % 10;
             setDigits(tmp, tmp, tmp, tmp, tmp, tmp);
             setDots(diagnosticCounter % 2, diagnosticCounter % 2);
@@ -253,38 +289,30 @@ void initRTC() {
 }
 
 void initWiFi() {
+    WiFi.hostname(CLOCK_HOSTNAME);
     WiFi.begin(ssid, password);
 }
 
 void initPWM() {
     // init PWM pins
-    pinMode(PWM_1_PIN, OUTPUT);
-    pinMode(PWM_2_PIN, OUTPUT);
-    pinMode(PWM_3_PIN, OUTPUT);
-    pinMode(PWM_4_PIN, OUTPUT);
-    pinMode(PWM_5_PIN, OUTPUT);
-    pinMode(PWM_6_PIN, OUTPUT);
+    for (uint8_t i = 0; i < 6; i++)
+        pinMode(pwmDutyPinsSequence[i], OUTPUT);
 
     analogWriteFreq(PWM_FREQ_HZ);
     analogWriteResolution(PWM_RES_BITS);
 }
 
-void setMaxBrightness() {
-    analogWrite(PWM_1_PIN, MAX_BRIGHTNESS);
-    analogWrite(PWM_2_PIN, MAX_BRIGHTNESS);
-    analogWrite(PWM_3_PIN, MAX_BRIGHTNESS);
-    analogWrite(PWM_4_PIN, MAX_BRIGHTNESS);
-    analogWrite(PWM_5_PIN, MAX_BRIGHTNESS);
-    analogWrite(PWM_6_PIN, MAX_BRIGHTNESS);
+void setMaxPWM() {
+    setPWM(MAX_BRIGHTNESS);
 }
 
-void setZeroBrightness() {
-    analogWrite(PWM_1_PIN, 0);
-    analogWrite(PWM_2_PIN, 0);
-    analogWrite(PWM_3_PIN, 0);
-    analogWrite(PWM_4_PIN, 0);
-    analogWrite(PWM_5_PIN, 0);
-    analogWrite(PWM_6_PIN, 0);
+void setZeroPWM() {
+    setPWM(0);
+}
+
+void setPWM(uint16_t value) {
+    for (uint8_t i = 0; i < 6; i++)
+        analogWrite(pwmDutyPinsSequence[i], value);
 }
 
 // value = [0...range]
@@ -345,6 +373,10 @@ void updateTimeFromNTP()
     if (lastNTPUpdateMillis == 0 || (currentMillis - lastNTPUpdateMillis > NTP_UPDATE_PERIOD_DAYS * 24 * 60 * 60 * 1000)) {
         wl_status_t wifiStatus = WiFi.status();
 
+        // TODO problems with time update
+        // TODO add debug output
+        // TODO need to configure reconnect rules!
+        // TODO sometimes time is completely invalid
         if (wifiStatus == WL_CONNECTED) {
             timeClient.begin();
             timeClient.update();
@@ -356,4 +388,64 @@ void updateTimeFromNTP()
             statusBlinkEnabled = true;
         }
     }
+}
+
+// Raw ADC values
+void inputHandler() {
+    uint32_t currentMillis = millis();
+    uint32_t currentMeasure = analogRead(ANALOG_BUTTON_PIN);
+
+    if (!readButton) {
+        if (currentMeasure < BUTTON_MEASURE_PRESSED_THRESHOLD) {
+            buttonsPressedStartMillis = currentMillis;
+            readButton = true;
+        }
+    } else {
+        if (buttonsInputMeasureCount < BUTTON_MEASURE_COUNTS) {
+            // measure
+            if (currentMillis - lastInputReadMillis >= BUTTON_MEASURE_DELAY_MILLIS) {
+                buttonsInputAcc[buttonsInputMeasureCount] = currentMeasure;
+                buttonsInputMeasureCount++;
+                lastInputReadMillis = currentMillis;
+            }
+        } else {
+            // calculate press and button type
+            if (currentMeasure > BUTTON_MEASURE_PRESSED_THRESHOLD) {
+                pressType = (currentMillis - buttonsPressedStartMillis) >= BUTTON_LONG_PRESS_TIME ?
+                    PressType::LONG : PressType::SHORT;
+
+                std::qsort(buttonsInputAcc, BUTTON_MEASURE_COUNTS, sizeof(uint16_t), comparator);
+                uint16_t measureMedian = buttonsInputAcc[BUTTON_MEASURE_COUNTS % 2];
+
+                if (measureMedian > (UP_BUTTON_VALUE - BUTTON_MEASURE_HALF_WINDOW) && measureMedian < (UP_BUTTON_VALUE + BUTTON_MEASURE_HALF_WINDOW)) {
+                    buttonType = ButtonType::UP;
+                }
+                if (measureMedian > (DOWN_BUTTON_VALUE - BUTTON_MEASURE_HALF_WINDOW) && measureMedian < (DOWN_BUTTON_VALUE + BUTTON_MEASURE_HALF_WINDOW)) {
+                    buttonType = ButtonType::DOWN;
+                }
+                if (measureMedian > std::max((SET_BUTTON_VALUE - BUTTON_MEASURE_HALF_WINDOW), 0) && measureMedian < (SET_BUTTON_VALUE + BUTTON_MEASURE_HALF_WINDOW)) {
+                    buttonType = ButtonType::SET;
+                }
+
+                // reset state
+                readButton = false;
+                buttonsInputMeasureCount = 0;
+                buttonsPressedStartMillis = 0;
+                lastInputReadMillis = 0;
+            }
+        }
+    }
+
+    // handle result
+    if (pressType != PressType::NONE && buttonType != ButtonType::NONE) {
+
+        // TODO handle press type
+
+        pressType = PressType::NONE;
+        buttonType = ButtonType::NONE;
+    }
+}
+
+int comparator(const void * a, const void * b) {
+    return ( *(uint16_t*)a - *(uint16_t*)b );
 }
