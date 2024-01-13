@@ -61,6 +61,9 @@ const char *password = WIFI_PASSWORD;
 
 const char *CLOCK_HOSTNAME = "nixie-clock-in14";
 
+static const uint16_t WIFI_CHECK_TIMEOUT = 300; // do not set values greater than ~500, this will affect the clock animation
+static const uint16_t WIFI_CHECK_DELAY = 3000;
+
 // Input
 static const uint16_t UP_BUTTON_VALUE = 389;
 static const uint16_t DOWN_BUTTON_VALUE = 105;
@@ -90,9 +93,12 @@ RTC_DS3231 rtc;
 // WiFi
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, NTP_SERVER_ADDR, TIMEZONE_OFFSET_SECONDS);
+wl_status_t lastWifiStatus = wl_status_t::WL_IDLE_STATUS;
+uint32_t lastWifiStatusCheck = 0;
 
 // Global state
-enum class State { CLOCK_DISPLAY, CLOCK_SETUP, BRIGHTNESS_SETUP, DIGITS_DIAGNOSTIC, ANTI_POISONING };
+enum class State { CLOCK_DISPLAY, CLOCK_SETUP, BRIGHTNESS_SETUP, DIGITS_DIAGNOSTIC, WIFI_STATUS, ANTI_POISONING,
+     STATE_ITEMS };
 State state = State::CLOCK_DISPLAY;
 
 // last obtained time from RTC chip
@@ -105,6 +111,7 @@ uint32_t lastClockChangeMillis = 0;
 uint32_t lastPWMChangeMillis = 0;
 uint32_t lastNTPUpdateMillis = 0;
 uint32_t lastBlinkMillis = 0;
+uint32_t diagnosticMillis = 0;
 
 uint32_t diagnosticCounter = 0;
 
@@ -140,7 +147,7 @@ void setRelativeBrightness(uint8_t pin, uint32_t value, uint32_t range);
 void rightDotBlinkSync();
 void rightDotBlinkAsync();
 void displayInitStatus(uint8_t status);
-void updateTimeFromNTP();
+void performNetworkTasks();
 void inputHandler();
 int comparator(const void * a, const void * b);
 
@@ -172,7 +179,7 @@ void loop() {
 
     // === processing section ===
     rightDotBlinkAsync(); // display status
-    updateTimeFromNTP();
+    performNetworkTasks();
 
     // === display section ===
     clearBufferWithoutDots();
@@ -182,28 +189,39 @@ void loop() {
 
 void handleState() {
     DateTime now = rtc.now();
-    uint32_t tmp;
+    uint32_t currentMillis = millis();
     switch (state) {
         case State::CLOCK_DISPLAY:
             displayClock(now);
             break;
         case State::CLOCK_SETUP:
             setMaxPWM();
+            setDigits((int) State::CLOCK_SETUP, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
             // TODO change clock
             break;
         case State::BRIGHTNESS_SETUP:
             setMaxPWM();
+            setDigits((int) State::BRIGHTNESS_SETUP, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
             // TODO change brightness
             break;
         case State::DIGITS_DIAGNOSTIC:
             setMaxPWM();
-            tmp = diagnosticCounter % 10;
-            setDigits(tmp, tmp, tmp, tmp, tmp, tmp);
+            if (currentMillis - diagnosticMillis >= 1000) {
+                diagnosticCounter = (diagnosticCounter + 1) % 10;
+                diagnosticMillis = currentMillis;
+            }
+
+            setDigits(diagnosticCounter, diagnosticCounter, diagnosticCounter, diagnosticCounter, diagnosticCounter, diagnosticCounter);
             setDots(diagnosticCounter % 2, diagnosticCounter % 2);
-            diagnosticCounter++;
-            delay(1000);
+            break;
+        case State::WIFI_STATUS:
+            setMaxPWM();
+            setDigits((int) State::WIFI_STATUS, 1, 0, 0, 0, 0, 0, 0, 0, 0, lastWifiStatus, 1);
             break;
         case State::ANTI_POISONING:
+            setMaxPWM();
+            // TODO вынести в отдельную функцию статуса - номер слева, цифра данных справа
+            setDigits((int) State::ANTI_POISONING, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
             // TODO ANTI_POISONING
             break;
         default:
@@ -291,6 +309,7 @@ void initRTC() {
 void initWiFi() {
     WiFi.hostname(CLOCK_HOSTNAME);
     WiFi.begin(ssid, password);
+    WiFi.setAutoReconnect(true);
 }
 
 void initPWM() {
@@ -358,34 +377,40 @@ void rightDotBlinkAsync() {
     }
 }
 
-void displayInitStatus(uint8_t status)
-{
+void displayInitStatus(uint8_t status) {
     clearBufferWithoutDots();
     setDots(0, 1);
     setDigits(status);
     displayBuffer();
 }
 
-// update time from NTP server every NTP_UPDATE_PERIOD_DAYS days from start
-void updateTimeFromNTP()
-{
+void performNetworkTasks() {
     uint32_t currentMillis = millis();
-    if (lastNTPUpdateMillis == 0 || (currentMillis - lastNTPUpdateMillis > NTP_UPDATE_PERIOD_DAYS * 24 * 60 * 60 * 1000)) {
-        wl_status_t wifiStatus = WiFi.status();
+    uint32_t lastClockChange = currentMillis - lastClockChangeMillis;
+    bool noAnimationPeriod = lastClockChange > (FADE_IN_MILLIS + 5) && lastClockChange < (FADE_OUT_MILLIS - 5);
 
-        // TODO problems with time update
-        // TODO add debug output
-        // TODO need to configure reconnect rules!
-        // TODO sometimes time is completely invalid
-        if (wifiStatus == WL_CONNECTED) {
+    // check connection status
+    if (currentMillis - lastWifiStatusCheck >= WIFI_CHECK_DELAY && noAnimationPeriod) {
+        int8_t status = WiFi.waitForConnectResult(WIFI_CHECK_TIMEOUT);
+        lastWifiStatus = status == -1 ? wl_status_t::WL_IDLE_STATUS : (wl_status_t) status;
+        lastWifiStatusCheck = currentMillis;
+    }
+
+    statusBlinkEnabled = lastWifiStatus != WL_CONNECTED;
+
+    // update time from NTP server every NTP_UPDATE_PERIOD_DAYS days from start
+    if ((lastNTPUpdateMillis == 0 || (currentMillis - lastNTPUpdateMillis > NTP_UPDATE_PERIOD_DAYS * 24 * 60 * 60 * 1000)) && noAnimationPeriod) {
+        if (lastWifiStatus == WL_CONNECTED) {
+            WiFi.persistent(true);
+
             timeClient.begin();
-            timeClient.update();
-            rtc.adjust(DateTime(timeClient.getEpochTime()));
-
-            lastNTPUpdateMillis = currentMillis;
-            statusBlinkEnabled = false;
-        } else {
-            statusBlinkEnabled = true;
+            if (timeClient.update()) {
+                rtc.adjust(DateTime(timeClient.getEpochTime()));
+                lastNTPUpdateMillis = currentMillis;
+                statusBlinkEnabled = false;
+            } else {
+                statusBlinkEnabled = true;
+            }
         }
     }
 }
@@ -411,6 +436,7 @@ void inputHandler() {
         } else {
             // calculate press and button type
             if (currentMeasure > BUTTON_MEASURE_PRESSED_THRESHOLD) {
+                // TODO add very long press
                 pressType = (currentMillis - buttonsPressedStartMillis) >= BUTTON_LONG_PRESS_TIME ?
                     PressType::LONG : PressType::SHORT;
 
@@ -438,11 +464,15 @@ void inputHandler() {
 
     // handle result
     if (pressType != PressType::NONE && buttonType != ButtonType::NONE) {
+        if (buttonType == ButtonType::SET && pressType == PressType::SHORT) {
+            // change current state
+            state = (State)(((int) state + 1) % ((int) State::STATE_ITEMS));
+        }
 
-        // TODO handle press type
+        // TODO handle input
 
-        pressType = PressType::NONE;
         buttonType = ButtonType::NONE;
+        pressType = PressType::NONE;
     }
 }
 
