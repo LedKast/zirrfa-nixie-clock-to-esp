@@ -387,7 +387,7 @@ void displayInitStatus(uint8_t status) {
 void performNetworkTasks() {
     uint32_t currentMillis = millis();
     uint32_t lastClockChange = currentMillis - lastClockChangeMillis;
-    bool noAnimationPeriod = lastClockChange > (FADE_IN_MILLIS + 5) && lastClockChange < (FADE_OUT_MILLIS - 5);
+    bool noAnimationPeriod = state != State::CLOCK_DISPLAY || (lastClockChange > (FADE_IN_MILLIS + 5) && lastClockChange < (1000 - FADE_OUT_MILLIS - WIFI_CHECK_TIMEOUT - 5));
 
     // check connection status
     if (currentMillis - lastWifiStatusCheck >= WIFI_CHECK_DELAY && noAnimationPeriod) {
